@@ -1,0 +1,101 @@
+// SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
+// SPDX-License-Identifier: Apache-2.0
+import { EventEmitter } from 'node:events';
+import { createServer } from 'node:net';
+import { Duplex } from 'node:stream';
+
+export class MockSocket extends Duplex {
+  destroyed = false;
+  closed = false;
+  handlers: Record<string, () => void> = {};
+  setEncoding = jest.fn();
+  setTimeout = jest.fn();
+
+  on(event: unknown, listener: unknown): this {
+    this.handlers[event as string] = listener as () => void;
+    return super.on(event as any, listener as any);
+  }
+
+  close(): this {
+    if (!this.closed) {
+      this.closed = true;
+      super.end();
+      this.emit('close');
+    }
+    return this;
+  }
+
+  end(): this {
+    return this.close();
+  }
+
+  destroy(_error?: Error): this {
+    if (!this.destroyed) {
+      this.destroyed = true;
+      super.destroy();
+    }
+    return this.close();
+  }
+
+  write = jest.fn((chunk) => {
+    this.emit('mockWrite', chunk);
+  }) as any;
+}
+
+export class MockServer extends EventEmitter {
+  private closed = false;
+  private sockets = new Set<MockSocket>();
+  private boundPort = 0;
+  listen = jest.fn((port, callback) => {
+    this.boundPort = port;
+    callback();
+  });
+  address = jest.fn(() => ({ port: this.boundPort }));
+  close = jest.fn((callback: (err?: Error) => void) => {
+    if (!this.closed) {
+      this.closed = true;
+      for (const socket of this.sockets) {
+        socket.close();
+      }
+      this.sockets.clear();
+      this.removeAllListeners();
+      callback();
+    }
+  });
+  connectionListener?: (socket: MockSocket) => void;
+  mockConnect(clientSocket: MockSocket, serverSocket: MockSocket): void {
+    if (this.connectionListener) {
+      clientSocket.on('mockWrite', (chunk: string) => {
+        serverSocket.emit('data', chunk);
+      });
+
+      serverSocket.on('mockWrite', (chunk: string) => {
+        clientSocket.emit('data', chunk);
+      });
+
+      clientSocket.emit('connect');
+      this.connectionListener(serverSocket);
+      this.sockets.add(serverSocket);
+    }
+  }
+}
+
+// Used only for tests that need a free port number with *nothing* listening on it.
+// For tests that start an Hl7Server, prefer `server.start(0)` which returns the OS-assigned
+// port and never has a release-then-rebind window.
+export async function getFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.listen(0, () => {
+      const { port } = server.address() as { port: number };
+      server.close((err) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(port);
+        }
+      });
+    });
+    server.on('error', reject);
+  });
+}

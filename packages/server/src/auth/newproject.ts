@@ -1,0 +1,48 @@
+// SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
+// SPDX-License-Identifier: Apache-2.0
+import { badRequest } from '@medplum/core';
+import type { Login, Reference, User } from '@medplum/fhirtypes';
+import type { Request, Response } from 'express';
+import { body } from 'express-validator';
+import { createProject } from '../fhir/operations/projectinit';
+import { sendOutcome } from '../fhir/outcomes';
+import { getGlobalSystemRepo } from '../fhir/repo';
+import { setLoginMembership } from '../oauth/utils';
+import { makeValidationMiddleware } from '../util/validator';
+
+export interface NewProjectRequest {
+  readonly loginId: string;
+  readonly projectName: string;
+}
+
+export const newProjectValidator = makeValidationMiddleware([
+  body('login').isUUID().withMessage('Login ID is required.'),
+  body('projectName').isLength({ min: 4, max: 72 }).withMessage('Project name must be between 4 and 72 characters'),
+]);
+
+/**
+ * Handles a HTTP request to /auth/newproject.
+ * Requires a partial login.
+ * Creates a Project, Profile, ProjectMembership, and default ClientApplication.
+ * @param req - The HTTP request.
+ * @param res - The HTTP response.
+ */
+export async function newProjectHandler(req: Request, res: Response): Promise<void> {
+  const systemRepo = getGlobalSystemRepo();
+  const login = await systemRepo.readResource<Login>('Login', req.body.login);
+
+  if (login.membership) {
+    sendOutcome(res, badRequest('Login already has a membership'));
+    return;
+  }
+
+  const projectName = req.body.projectName;
+  const user = await systemRepo.readReference<User>(login.user as Reference<User>);
+  const { membership } = await createProject(projectName, user);
+  const updatedLogin = await setLoginMembership(login, membership);
+
+  res.status(200).json({
+    login: updatedLogin.id,
+    code: updatedLogin.code,
+  });
+}
