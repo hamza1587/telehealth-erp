@@ -60,6 +60,7 @@ import { webhookRouter } from './webhook/routes';
 import { wellKnownRouter } from './wellknown';
 import { closeWorkers, initWorkers } from './workers';
 import { closeWebSockets, initWebSockets } from './ws/routes';
+import { consultationRouter } from './consultation';
 
 let server: http.Server | undefined = undefined;
 
@@ -237,11 +238,12 @@ export async function initApp(app: Express, config: MedplumServerConfig): Promis
   apiRouter.use('/oauth2/', oauthRouter);
   apiRouter.use('/scim/v2/', scimRouter);
   apiRouter.use('/storage/', storageRouter);
-  apiRouter.use('/webhook/', webhookRouter);
+apiRouter.use('/webhook/', webhookRouter);
+apiRouter.use('/consultation/', consultationRouter);
 
-  if (config.mcpEnabled) {
-    apiRouter.use('/mcp', mcpRouter);
-  }
+if (config.mcpEnabled) {
+apiRouter.use('/mcp', mcpRouter);
+}
 
   app.use('/api/', apiRouter);
   app.use('/', apiRouter);

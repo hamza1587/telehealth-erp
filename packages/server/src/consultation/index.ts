@@ -1,0 +1,1 @@
+export { consultationRouter } from './routes';
