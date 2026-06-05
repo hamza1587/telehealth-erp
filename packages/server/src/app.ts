@@ -62,6 +62,7 @@ import { closeWorkers, initWorkers } from './workers';
 import { closeWebSockets, initWebSockets } from './ws/routes';
 import { consultationRouter } from './consultation';
 import { platformRouter, telehealthRouter } from './telehealth/routes';
+import { gatewayRouter } from './telehealth/controllers/PrescriptionGatewayController';
 
 let server: http.Server | undefined = undefined;
 
@@ -243,6 +244,7 @@ apiRouter.use('/webhook/', webhookRouter);
   apiRouter.use('/consultation/', consultationRouter);
   apiRouter.use('/platform/', platformRouter);
   apiRouter.use('/telehealth/', telehealthRouter);
+  apiRouter.use('/gateway/', gatewayRouter);
 
 if (config.mcpEnabled) {
 apiRouter.use('/mcp', mcpRouter);
