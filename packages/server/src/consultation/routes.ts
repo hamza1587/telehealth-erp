@@ -1,59 +1,23 @@
 import { Router, Request, Response } from 'express';
-import { v4 as uuidv4 } from 'uuid';
+import * as CallRepository from './repositories/CallRepository';
 
 const router = Router();
 
-interface Call {
-  id: string;
-  roomId: string;
-  patientId: string;
-  doctorId: string;
-  status: 'waiting' | 'active' | 'completed';
-  startTime?: Date;
-  endTime?: Date;
-  isRecording: boolean;
-  recordingConsent: boolean;
-  createdAt: Date;
+function callId(req: Request): string {
+  const v = req.params.id;
+  return Array.isArray(v) ? v[0] : v;
 }
-
-interface ChatMessage {
-  id: string;
-  callId: string;
-  senderId: string;
-  senderName: string;
-  content: string;
-  timestamp: Date;
-}
-
-interface Recording {
-  id: string;
-  callId: string;
-  url: string;
-  duration: number;
-  consentGiven: boolean;
-  createdAt: Date;
-}
-
-const calls: Map<string, Call> = new Map();
-const chatMessages: Map<string, ChatMessage[]> = new Map();
-const recordings: Map<string, Recording> = new Map();
 
 router.post('/signal', async (req: Request, res: Response): Promise<void> => {
   try {
     const { type, data, targetId, senderId } = req.body;
-
     if (!type || !data || !targetId || !senderId) {
       res.status(400).json({ error: 'Missing required fields' });
       return;
     }
-
-    res.json({
-      success: true,
-      message: 'Signal sent',
-      timestamp: new Date().toISOString()
-    });
+    res.json({ success: true, message: 'Signal sent', timestamp: new Date().toISOString() });
   } catch (error) {
-    console.error('Signal error:', error);
+    console.error('[consultation] signal error:', error instanceof Error ? error.message : String(error));
     res.status(500).json({ error: 'Failed to send signal' });
   }
 });
@@ -61,103 +25,63 @@ router.post('/signal', async (req: Request, res: Response): Promise<void> => {
 router.post('/', async (req: Request, res: Response): Promise<void> => {
   try {
     const { patientId, doctorId, recordingConsent = false } = req.body;
-
     if (!patientId || !doctorId) {
       res.status(400).json({ error: 'Patient ID and Doctor ID are required' });
       return;
     }
-
-    const call: Call = {
-      id: uuidv4(),
-      roomId: `room-${uuidv4()}`,
-      patientId,
-      doctorId,
-      status: 'waiting',
-      isRecording: false,
-      recordingConsent,
-      createdAt: new Date()
-    };
-
-    calls.set(call.id, call);
-    chatMessages.set(call.id, []);
-
+    const call = await CallRepository.create(patientId, doctorId, recordingConsent);
     res.status(201).json(call);
   } catch (error) {
-    console.error('Create call error:', error);
+    console.error('[consultation] create call error:', error instanceof Error ? error.message : String(error));
     res.status(500).json({ error: 'Failed to create call' });
   }
 });
 
 router.get('/:id', async (req: Request, res: Response): Promise<void> => {
   try {
-    const callId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    const call = calls.get(callId);
-    if (!call) {
-      res.status(404).json({ error: 'Call not found' });
-      return;
-    }
+    const call = await CallRepository.findById(callId(req));
+    if (!call) { res.status(404).json({ error: 'Call not found' }); return; }
     res.json(call);
   } catch (error) {
-    console.error('Get call error:', error);
+    console.error('[consultation] get call error:', error instanceof Error ? error.message : String(error));
     res.status(500).json({ error: 'Failed to get call' });
   }
 });
 
 router.post('/:id/join', async (req: Request, res: Response): Promise<void> => {
   try {
-    const callId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    const call = calls.get(callId);
-    if (!call) {
-      res.status(404).json({ error: 'Call not found' });
-      return;
-    }
+    const id = callId(req);
+    const call = await CallRepository.findById(id);
+    if (!call) { res.status(404).json({ error: 'Call not found' }); return; }
+    if (call.status === 'completed') { res.status(400).json({ error: 'Call has ended' }); return; }
 
-    if (call.status === 'completed') {
-      res.status(400).json({ error: 'Call has ended' });
-      return;
-    }
-
-    if (call.status === 'waiting') {
-      call.status = 'active';
-      call.startTime = new Date();
-    }
-
-    const token = `token-${call.roomId}-${Date.now()}`;
-
-    res.json({ token, roomId: call.roomId, call });
+    const updated = await CallRepository.join(id);
+    const token = `token-${updated?.roomId ?? id}-${Date.now()}`;
+    res.json({ token, roomId: updated?.roomId ?? call.roomId, call: updated ?? call });
   } catch (error) {
-    console.error('Join call error:', error);
+    console.error('[consultation] join call error:', error instanceof Error ? error.message : String(error));
     res.status(500).json({ error: 'Failed to join call' });
   }
 });
 
 router.post('/:id/end', async (req: Request, res: Response): Promise<void> => {
   try {
-    const callId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    const call = calls.get(callId);
-    if (!call) {
-      res.status(404).json({ error: 'Call not found' });
-      return;
-    }
-
-    call.status = 'completed';
-    call.endTime = new Date();
-    call.isRecording = false;
-
+    const id = callId(req);
+    const call = await CallRepository.end(id);
+    if (!call) { res.status(404).json({ error: 'Call not found' }); return; }
     res.json({ success: true, call });
   } catch (error) {
-    console.error('End call error:', error);
+    console.error('[consultation] end call error:', error instanceof Error ? error.message : String(error));
     res.status(500).json({ error: 'Failed to end call' });
   }
 });
 
 router.get('/:id/chat', async (req: Request, res: Response): Promise<void> => {
   try {
-    const callId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    const messages = chatMessages.get(callId) || [];
+    const messages = await CallRepository.getChatMessages(callId(req));
     res.json(messages);
   } catch (error) {
-    console.error('Get chat error:', error);
+    console.error('[consultation] get chat error:', error instanceof Error ? error.message : String(error));
     res.status(500).json({ error: 'Failed to get chat messages' });
   }
 });
@@ -173,87 +97,48 @@ router.post('/:id/chat', async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    const callId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    const messages = chatMessages.get(callId) || [];
-    const newMessage: ChatMessage = {
-      id: uuidv4(),
-      callId,
-      senderId,
-      senderName,
-      content,
-      timestamp: new Date()
-    };
-
-    messages.push(newMessage);
-    chatMessages.set(callId, messages);
-
-    res.status(201).json(newMessage);
+    const msg = await CallRepository.addChatMessage(callId(req), senderId, senderName, content);
+    res.status(201).json(msg);
   } catch (error) {
-    console.error('Send chat error:', error);
+    console.error('[consultation] send chat error:', error instanceof Error ? error.message : String(error));
     res.status(500).json({ error: 'Failed to send message' });
   }
 });
 
 router.post('/:id/recording/start', async (req: Request, res: Response): Promise<void> => {
   try {
-    const callId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    const call = calls.get(callId);
-    if (!call) {
-      res.status(404).json({ error: 'Call not found' });
-      return;
-    }
-
-    if (!call.recordingConsent) {
-      res.status(403).json({ error: 'Recording consent required' });
-      return;
-    }
-
-    call.isRecording = true;
-
+    const id = callId(req);
+    const call = await CallRepository.findById(id);
+    if (!call) { res.status(404).json({ error: 'Call not found' }); return; }
+    if (!call.recordingConsent) { res.status(403).json({ error: 'Recording consent required' }); return; }
+    await CallRepository.setRecording(id, true);
     res.json({ success: true, message: 'Recording started' });
   } catch (error) {
-    console.error('Start recording error:', error);
+    console.error('[consultation] start recording error:', error instanceof Error ? error.message : String(error));
     res.status(500).json({ error: 'Failed to start recording' });
   }
 });
 
 router.post('/:id/recording/stop', async (req: Request, res: Response): Promise<void> => {
   try {
-    const callId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    const call = calls.get(callId);
-    if (!call) {
-      res.status(404).json({ error: 'Call not found' });
-      return;
-    }
-
-    call.isRecording = false;
-
-    const recording: Recording = {
-      id: uuidv4(),
-      callId,
-      url: `https://storage.example.com/recordings/${callId}.mp4`,
-      duration: 0,
-      consentGiven: true,
-      createdAt: new Date()
-    };
-
-    recordings.set(recording.id, recording);
-
+    const id = callId(req);
+    const call = await CallRepository.findById(id);
+    if (!call) { res.status(404).json({ error: 'Call not found' }); return; }
+    await CallRepository.setRecording(id, false);
+    const recording = await CallRepository.addRecording(id, `https://storage.example.com/recordings/${id}.mp4`, 0, true);
     res.json({ success: true, recording });
   } catch (error) {
-    console.error('Stop recording error:', error);
+    console.error('[consultation] stop recording error:', error instanceof Error ? error.message : String(error));
     res.status(500).json({ error: 'Failed to stop recording' });
   }
 });
 
 router.get('/:id/recording', async (req: Request, res: Response): Promise<void> => {
   try {
-    const callId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    const callRecordings = Array.from(recordings.values())
-      .filter(r => r.callId === callId);
-    res.json(callRecordings);
+    const recordings = await CallRepository.getRecordings(callId(req));
+    res.json(recordings);
   } catch (error) {
-    console.error('Get recordings error:', error);
+    console.error('[consultation] get recordings error:', error instanceof Error ? error.message : String(error));
     res.status(500).json({ error: 'Failed to get recordings' });
   }
 });

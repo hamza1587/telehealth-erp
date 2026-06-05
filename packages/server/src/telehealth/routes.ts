@@ -6,6 +6,16 @@ import { authenticateRequest } from '../oauth/middleware';
 import { getAuthenticatedContext } from '../context';
 import { sendOutcome } from '../fhir/outcomes';
 import { notFound } from '@medplum/core';
+import * as AppointmentRepo from './repositories/AppointmentRepository';
+import * as DoctorRepo from './repositories/DoctorRepository';
+import * as PatientRepo from './repositories/PatientRepository';
+import * as ClinicalNoteRepo from './repositories/ClinicalNoteRepository';
+import * as PrescriptionRepo from './repositories/PrescriptionRepository';
+import * as ConsultationRepo from './repositories/ConsultationRepository';
+import * as TicketRepo from './repositories/TicketRepository';
+import * as NotificationRepo from './repositories/NotificationRepository';
+import * as WalletRepo from './repositories/WalletRepository';
+import * as AuditLogRepo from './repositories/AuditLogRepository';
 
 function param(req: Request, key: string): string {
   const v = req.params[key];
@@ -13,67 +23,12 @@ function param(req: Request, key: string): string {
   return v;
 }
 
-// ──────────────────────────────────────────────
-// STORES
-// ──────────────────────────────────────────────
-interface Appointment {
-  id: string; patientAccountId: string; doctorProfileId: string;
-  scheduledStartsAt: Date; scheduledEndsAt: Date; consultationMode: 'video'|'phone';
-  status: 'pending_payment'|'confirmed'|'in_progress'|'completed'|'cancelled_patient'|'cancelled_doctor'|'no_show_patient';
-  pricePerMinute: number; createdAt: Date;
-}
-const appointments: Map<string, Appointment> = new Map();
-
-interface DoctorProfile {
-  id: string; accountId: string; displayName: string; specialty: string; legalName?: string; phone?: string;
-  consultationMode: 'video'|'phone'|'both'; verificationStatus: 'draft'|'pending'|'verified'|'rejected';
-  availabilityWindows: { id: string; dayOfWeek: number; startTime: string; endTime: string }[]; createdAt: Date;
-}
-const doctorProfiles: Map<string, DoctorProfile> = new Map();
-
-interface PatientProfile {
-  id: string; accountId: string; displayName: string;
-  hasMedicalProfile: boolean; createdAt: Date;
-}
-const patientProfiles: Map<string, PatientProfile> = new Map();
-
-interface ClinicalNote {
-  id: string; consultationId: string; authorId: string; status: 'draft'|'finalized'; createdAt: Date;
-}
-const clinicalNotes: Map<string, ClinicalNote> = new Map();
-
-interface Prescription {
-  id: string; consultationId: string; authorId: string; medications: any[]; status: 'draft'|'issued'; createdAt: Date;
-}
-const prescriptions: Map<string, Prescription> = new Map();
-
-interface Consultation {
-  id: string; appointmentId: string; status: 'created'|'active'|'ended'; startedAt?: Date; endedAt?: Date; createdAt: Date;
-}
-const consultations: Map<string, Consultation> = new Map();
-
-interface Ticket {
-  id: string; userId: string; subject: string; category: string; priority: 'low'|'medium'|'high';
-  message: string; status: 'open'|'in_progress'|'resolved';
-  messages: { id: string; senderId: string; content: string; timestamp: Date }[];
-  createdAt: Date;
-}
-const tickets: Map<string, Ticket> = new Map();
-
-interface Notification { id: string; userId: string; title: string; body: string; read: boolean; createdAt: Date; }
-const notificationsList: Notification[] = [];
-
-interface Wallet { userId: string; balanceCents: number; currency: string; createdAt: Date; }
-const wallets: Map<string, Wallet> = new Map();
-const ledger: { id: string; userId: string; type: string; amountCents: number; description: string; createdAt: Date }[] = [];
-const auditLog: { id: string; actorId: string; action: string; target: string; targetId: string; metadata: Record<string, any>; timestamp: Date }[] = [];
-
 function uid(_req: Request): string {
   return getAuthenticatedContext().authState.membership.profile.reference as string;
 }
 
-function audit(req: Request, action: string, target: string, targetId: string, meta: Record<string, any> = {}): void {
-  auditLog.push({ id: uuidv4(), actorId: uid(req), action, target, targetId, metadata: meta, timestamp: new Date() });
+async function audit(req: Request, action: string, target: string, targetId: string, meta: Record<string, unknown> = {}): Promise<void> {
+  await AuditLogRepo.append(uid(req), action, target, targetId, meta);
 }
 
 // ──────────────────────────────────────────────
@@ -81,270 +36,421 @@ function audit(req: Request, action: string, target: string, targetId: string, m
 // ──────────────────────────────────────────────
 const platform = Router();
 
-platform.get('/appointments/my-appointments', (req: Request, res: Response) => {
-  const u = uid(req);
-  res.json(Array.from(appointments.values()).filter(a => a.patientAccountId === u || a.doctorProfileId === u));
+platform.get('/appointments/my-appointments', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const appointments = await AppointmentRepo.findByUser(uid(req));
+    res.json(appointments);
+  } catch (error) {
+    console.error('[platform] my-appointments error:', error instanceof Error ? error.message : String(error));
+    sendOutcome(res, notFound);
+  }
 });
 
-platform.get('/appointments/:appointmentId', (req: Request, res: Response) => {
-  const apt = appointments.get(param(req, 'appointmentId'));
-  if (!apt) { sendOutcome(res, notFound); return; }
-  res.json(apt);
+platform.get('/appointments/:appointmentId', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const apt = await AppointmentRepo.findById(param(req, 'appointmentId'));
+    if (!apt) { sendOutcome(res, notFound); return; }
+    res.json(apt);
+  } catch (error) {
+    console.error('[platform] get appointment error:', error instanceof Error ? error.message : String(error));
+    sendOutcome(res, notFound);
+  }
 });
 
-platform.post('/bookings', async (req: Request, res: Response) => {
+platform.post('/bookings', async (req: Request, res: Response): Promise<void> => {
   try {
     const u = uid(req);
     const body = req.body as { doctorProfileId: string; scheduledStartsAt: string; scheduledEndsAt?: string; consultationMode?: string; pricePerMinute?: number };
     if (!body.doctorProfileId || !body.scheduledStartsAt) { sendOutcome(res, notFound); return; }
-    const apt: Appointment = {
-      id: uuidv4(), patientAccountId: u, doctorProfileId: body.doctorProfileId,
+    const apt = await AppointmentRepo.create({
+      patientAccountId: u,
+      doctorProfileId: body.doctorProfileId,
       scheduledStartsAt: new Date(body.scheduledStartsAt),
       scheduledEndsAt: new Date(body.scheduledEndsAt ?? body.scheduledStartsAt),
-      consultationMode: (body.consultationMode as 'video'|'phone') ?? 'video',
-      status: 'pending_payment', pricePerMinute: body.pricePerMinute ?? 1.5, createdAt: new Date(),
-    };
-    appointments.set(apt.id, apt);
-    audit(req, 'appointment.book', 'Appointment', apt.id);
+      consultationMode: (body.consultationMode as 'video' | 'phone') ?? 'video',
+      pricePerMinute: body.pricePerMinute ?? 1.5,
+      status: 'pending_payment',
+    });
+    await audit(req, 'appointment.book', 'Appointment', apt.id);
     res.status(201).json(apt);
-  } catch {
+  } catch (error) {
+    console.error('[platform] book appointment error:', error instanceof Error ? error.message : String(error));
     sendOutcome(res, notFound);
   }
 });
 
-platform.post('/appointments/:id/cancel', (req: Request, res: Response) => {
-  const apt = appointments.get(param(req, 'id'));
-  if (!apt) { sendOutcome(res, notFound); return; }
-  apt.status = 'cancelled_patient';
-  audit(req, 'appointment.cancel', 'Appointment', apt.id);
-  res.json({ success: true, apt });
+platform.post('/appointments/:id/cancel', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const id = param(req, 'id');
+    const apt = await AppointmentRepo.updateStatus(id, 'cancelled_patient');
+    if (!apt) { sendOutcome(res, notFound); return; }
+    await audit(req, 'appointment.cancel', 'Appointment', id);
+    res.json({ success: true, apt });
+  } catch (error) {
+    console.error('[platform] cancel appointment error:', error instanceof Error ? error.message : String(error));
+    sendOutcome(res, notFound);
+  }
 });
 
-platform.post('/appointments/:id/reschedule', (req: Request, res: Response) => {
-  const apt = appointments.get(param(req, 'id'));
-  if (!apt) { sendOutcome(res, notFound); return; }
-  const { scheduledStartsAt, scheduledEndsAt } = req.body as { scheduledStartsAt: string; scheduledEndsAt?: string };
-  apt.scheduledStartsAt = new Date(scheduledStartsAt);
-  apt.scheduledEndsAt = new Date(scheduledEndsAt ?? scheduledStartsAt);
-  apt.status = 'confirmed';
-  audit(req, 'appointment.reschedule', 'Appointment', apt.id);
-  res.json({ success: true, apt });
+platform.post('/appointments/:id/reschedule', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const id = param(req, 'id');
+    const { scheduledStartsAt, scheduledEndsAt } = req.body as { scheduledStartsAt: string; scheduledEndsAt?: string };
+    const apt = await AppointmentRepo.reschedule(id, new Date(scheduledStartsAt), new Date(scheduledEndsAt ?? scheduledStartsAt));
+    if (!apt) { sendOutcome(res, notFound); return; }
+    await audit(req, 'appointment.reschedule', 'Appointment', id);
+    res.json({ success: true, apt });
+  } catch (error) {
+    console.error('[platform] reschedule error:', error instanceof Error ? error.message : String(error));
+    sendOutcome(res, notFound);
+  }
 });
 
 // Discovery
-platform.get('/discovery/doctors', (req: Request, res: Response) => {
-  const q = String(req.query.q ?? '');
-  const specialty = String(req.query.specialty ?? '');
-  let list = Array.from(doctorProfiles.values()).filter(d => d.verificationStatus === 'verified');
-  if (specialty) list = list.filter(d => d.specialty.toLowerCase().includes(specialty.toLowerCase()));
-  if (q) list = list.filter(d => d.displayName.toLowerCase().includes(q.toLowerCase()));
-  res.json(list);
+platform.get('/discovery/doctors', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const q = req.query.q ? String(req.query.q) : undefined;
+    const specialty = req.query.specialty ? String(req.query.specialty) : undefined;
+    const list = await DoctorRepo.findAllVerified(specialty, q);
+    res.json(list);
+  } catch (error) {
+    console.error('[platform] discovery doctors error:', error instanceof Error ? error.message : String(error));
+    res.json([]);
+  }
 });
 
-platform.get('/discovery/doctors/:doctorId', (req: Request, res: Response) => {
-  const doc = doctorProfiles.get(param(req, 'doctorId'));
-  res.json(doc ?? { error: 'Not found' });
+platform.get('/discovery/doctors/:doctorId', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const doc = await DoctorRepo.findById(param(req, 'doctorId'));
+    res.json(doc ?? { error: 'Not found' });
+  } catch (error) {
+    console.error('[platform] get doctor error:', error instanceof Error ? error.message : String(error));
+    res.json({ error: 'Not found' });
+  }
 });
 
 // Notifications
-platform.get('/notifications/my-notifications', (req: Request, res: Response) => {
-  res.json(notificationsList.filter(n => n.userId === uid(req)));
+platform.get('/notifications/my-notifications', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const notifications = await NotificationRepo.findByUser(uid(req));
+    res.json(notifications);
+  } catch (error) {
+    console.error('[platform] notifications error:', error instanceof Error ? error.message : String(error));
+    res.json([]);
+  }
 });
 
-platform.get('/notifications/my-preferences', (_req: Request, res: Response) => res.json({ email: true, push: true, sms: true }));
-
-platform.post('/notifications/:notifId/read', (req: Request, res: Response) => {
-  const n = notificationsList.find(n => n.id === param(req, 'notifId'));
-  if (n) n.read = true;
-  res.json({ success: true });
+platform.get('/notifications/my-preferences', (_req: Request, res: Response): void => {
+  res.json({ email: true, push: true, sms: true });
 });
 
-platform.post('/notifications/read-all', (req: Request, res: Response) => {
-  notificationsList.filter(n => n.userId === uid(req)).forEach(n => { n.read = true; });
-  res.json({ success: true });
+platform.post('/notifications/:notifId/read', async (req: Request, res: Response): Promise<void> => {
+  try {
+    await NotificationRepo.markRead(param(req, 'notifId'));
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[platform] mark read error:', error instanceof Error ? error.message : String(error));
+    res.json({ success: false });
+  }
 });
 
-platform.put('/notifications/my-preferences', (req: Request, res: Response) => res.json({ success: true, preferences: req.body }));
+platform.post('/notifications/read-all', async (req: Request, res: Response): Promise<void> => {
+  try {
+    await NotificationRepo.markAllRead(uid(req));
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[platform] mark all read error:', error instanceof Error ? error.message : String(error));
+    res.json({ success: false });
+  }
+});
+
+platform.put('/notifications/my-preferences', (req: Request, res: Response): void => {
+  res.json({ success: true, preferences: req.body });
+});
 
 // Support
-platform.get('/support/my-tickets', (req: Request, res: Response) => res.json(Array.from(tickets.values()).filter(t => t.userId === uid(req))));
-platform.get('/support/tickets/:ticketId', (req: Request, res: Response) => {
-  const t = tickets.get(param(req, 'ticketId'));
-  res.json(t ?? { error: 'Not found' });
+platform.get('/support/my-tickets', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const tickets = await TicketRepo.findByUser(uid(req));
+    res.json(tickets);
+  } catch (error) {
+    console.error('[platform] my-tickets error:', error instanceof Error ? error.message : String(error));
+    res.json([]);
+  }
 });
 
-platform.post('/support/tickets', async (req: Request, res: Response) => {
+platform.get('/support/tickets/:ticketId', async (req: Request, res: Response): Promise<void> => {
   try {
-    const u = uid(req);
+    const t = await TicketRepo.findById(param(req, 'ticketId'));
+    res.json(t ?? { error: 'Not found' });
+  } catch (error) {
+    console.error('[platform] get ticket error:', error instanceof Error ? error.message : String(error));
+    res.json({ error: 'Not found' });
+  }
+});
+
+platform.post('/support/tickets', async (req: Request, res: Response): Promise<void> => {
+  try {
     const body = req.body as { subject: string; category: string; priority?: string; message: string };
-    const t: Ticket = {
-      id: uuidv4(), userId: u, subject: body.subject, category: body.category,
-      priority: (body.priority as 'low'|'medium'|'high') ?? 'medium',
-      message: body.message, status: 'open',
-      messages: [{ id: uuidv4(), senderId: u, content: body.message, timestamp: new Date() }],
-      createdAt: new Date(),
-    };
-    tickets.set(t.id, t);
-    audit(req, 'ticket.create', 'Ticket', t.id);
+    const t = await TicketRepo.create(uid(req), body);
+    await audit(req, 'ticket.create', 'Ticket', t.id);
     res.status(201).json(t);
-  } catch {
+  } catch (error) {
+    console.error('[platform] create ticket error:', error instanceof Error ? error.message : String(error));
     sendOutcome(res, notFound);
   }
 });
 
-platform.post('/support/tickets/:ticketId/reply', (req: Request, res: Response) => {
-  const t = tickets.get(param(req, 'ticketId'));
-  if (!t) { sendOutcome(res, notFound); return; }
-  t.messages.push({ id: uuidv4(), senderId: uid(req), content: req.body.content, timestamp: new Date() });
-  res.json(t);
+platform.post('/support/tickets/:ticketId/reply', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const t = await TicketRepo.addMessage(param(req, 'ticketId'), uid(req), req.body.content);
+    if (!t) { sendOutcome(res, notFound); return; }
+    res.json(t);
+  } catch (error) {
+    console.error('[platform] reply ticket error:', error instanceof Error ? error.message : String(error));
+    sendOutcome(res, notFound);
+  }
 });
 
-platform.post('/support/tickets/:ticketId/close', (req: Request, res: Response) => {
-  const t = tickets.get(param(req, 'ticketId'));
-  if (!t) { sendOutcome(res, notFound); return; }
-  t.status = 'resolved';
-  audit(req, 'ticket.close', 'Ticket', t.id);
-  res.json({ success: true });
+platform.post('/support/tickets/:ticketId/close', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const id = param(req, 'ticketId');
+    await TicketRepo.close(id);
+    await audit(req, 'ticket.close', 'Ticket', id);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[platform] close ticket error:', error instanceof Error ? error.message : String(error));
+    sendOutcome(res, notFound);
+  }
 });
 
 // Clinical Notes
-platform.get('/clinical-notes/consultation/:consultationId', (req: Request, res: Response) => {
-  const cId = param(req, 'consultationId');
-  const n = Array.from(clinicalNotes.values()).find(n => n.consultationId === cId);
-  res.json(n ?? null);
+platform.get('/clinical-notes/consultation/:consultationId', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const note = await ClinicalNoteRepo.findByConsultationId(param(req, 'consultationId'));
+    res.json(note ?? null);
+  } catch (error) {
+    console.error('[platform] get notes error:', error instanceof Error ? error.message : String(error));
+    res.json(null);
+  }
 });
 
-platform.post('/clinical-notes/consultation/:consultationId', async (req: Request, res: Response) => {
+platform.post('/clinical-notes/consultation/:consultationId', async (req: Request, res: Response): Promise<void> => {
   try {
     const u = uid(req);
     const cId = param(req, 'consultationId');
-    const existing = Array.from(clinicalNotes.values()).find(n => n.consultationId === cId);
+    const existing = await ClinicalNoteRepo.findByConsultationId(cId);
     if (existing) {
       if (existing.status === 'finalized') { sendOutcome(res, notFound); return; }
-      Object.assign(existing, req.body as Record<string, any>);
-      res.json(existing); return;
+      const updated = await ClinicalNoteRepo.update(existing.id as string, req.body as Record<string, unknown>);
+      res.json(updated); return;
     }
-    const note: ClinicalNote = { id: uuidv4(), consultationId: cId, authorId: u, status: 'draft', createdAt: new Date(), ...(req.body as Record<string, any>) };
-    clinicalNotes.set(note.id, note);
+    const note = await ClinicalNoteRepo.create(cId, u, req.body as Record<string, unknown>);
     res.status(201).json(note);
-  } catch {
+  } catch (error) {
+    console.error('[platform] upsert note error:', error instanceof Error ? error.message : String(error));
     sendOutcome(res, notFound);
   }
 });
 
-platform.post('/clinical-notes/:noteId/finalize', (req: Request, res: Response) => {
-  const note = clinicalNotes.get(param(req, 'noteId'));
-  if (!note) { sendOutcome(res, notFound); return; }
-  note.status = 'finalized';
-  audit(req, 'clinical.finalize', 'ClinicalNote', note.id);
-  res.json({ success: true, note });
+platform.post('/clinical-notes/:noteId/finalize', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const id = param(req, 'noteId');
+    const note = await ClinicalNoteRepo.finalize(id);
+    if (!note) { sendOutcome(res, notFound); return; }
+    await audit(req, 'clinical.finalize', 'ClinicalNote', id);
+    res.json({ success: true, note });
+  } catch (error) {
+    console.error('[platform] finalize note error:', error instanceof Error ? error.message : String(error));
+    sendOutcome(res, notFound);
+  }
 });
 
 // Prescriptions
-platform.get('/prescriptions/consultation/:consultationId', (req: Request, res: Response) => {
-  const cId = param(req, 'consultationId');
-  const rx = Array.from(prescriptions.values()).find(p => p.consultationId === cId);
-  res.json(rx ?? null);
+platform.get('/prescriptions/consultation/:consultationId', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const rx = await PrescriptionRepo.findByConsultationId(param(req, 'consultationId'));
+    res.json(rx ?? null);
+  } catch (error) {
+    console.error('[platform] get rx error:', error instanceof Error ? error.message : String(error));
+    res.json(null);
+  }
 });
 
-platform.post('/prescriptions/consultation/:consultationId', async (req: Request, res: Response) => {
+platform.post('/prescriptions/consultation/:consultationId', async (req: Request, res: Response): Promise<void> => {
   try {
     const u = uid(req);
     const cId = param(req, 'consultationId');
-    const existing = Array.from(prescriptions.values()).find(p => p.consultationId === cId);
+    const existing = await PrescriptionRepo.findByConsultationId(cId);
     if (existing) {
       if (existing.status === 'issued') { sendOutcome(res, notFound); return; }
-      Object.assign(existing, req.body as Record<string, any>);
-      res.json(existing); return;
+      const updated = await PrescriptionRepo.update(existing.id as string, req.body as Record<string, unknown>);
+      res.json(updated); return;
     }
-    const rx: Prescription = { id: uuidv4(), consultationId: cId, authorId: u, medications: [], status: 'draft', createdAt: new Date(), ...(req.body as Record<string, any>) };
-    prescriptions.set(rx.id, rx);
+    const rx = await PrescriptionRepo.create(cId, u, req.body as Record<string, unknown>);
     res.status(201).json(rx);
-  } catch {
+  } catch (error) {
+    console.error('[platform] upsert rx error:', error instanceof Error ? error.message : String(error));
     sendOutcome(res, notFound);
   }
 });
 
-platform.post('/prescriptions/:rxId/issue', (req: Request, res: Response) => {
-  const rx = prescriptions.get(param(req, 'rxId'));
-  if (!rx) { sendOutcome(res, notFound); return; }
-  rx.status = 'issued';
-  audit(req, 'rx.issue', 'Prescription', rx.id);
-  res.json({ success: true, prescription: rx });
+platform.post('/prescriptions/:rxId/issue', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const id = param(req, 'rxId');
+    const prescription = await PrescriptionRepo.issue(id);
+    if (!prescription) { sendOutcome(res, notFound); return; }
+    await audit(req, 'rx.issue', 'Prescription', id);
+    res.json({ success: true, prescription });
+  } catch (error) {
+    console.error('[platform] issue rx error:', error instanceof Error ? error.message : String(error));
+    sendOutcome(res, notFound);
+  }
 });
 
 // Consultations
-platform.post('/consultations/appointment/:appointmentId', async (req: Request, res: Response) => {
+platform.post('/consultations/appointment/:appointmentId', async (req: Request, res: Response): Promise<void> => {
   try {
-    const c: Consultation = { id: uuidv4(), appointmentId: param(req, 'appointmentId'), status: 'created', createdAt: new Date() };
-    consultations.set(c.id, c);
+    const c = await ConsultationRepo.create(param(req, 'appointmentId'));
     res.status(201).json(c);
-  } catch {
+  } catch (error) {
+    console.error('[platform] create consultation error:', error instanceof Error ? error.message : String(error));
     sendOutcome(res, notFound);
   }
 });
 
-platform.get('/consultations/:consultationId', (req: Request, res: Response) => {
-  const c = consultations.get(param(req, 'consultationId'));
-  res.json(c ?? { error: 'Not found' });
+platform.get('/consultations/:consultationId', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const c = await ConsultationRepo.findById(param(req, 'consultationId'));
+    res.json(c ?? { error: 'Not found' });
+  } catch (error) {
+    console.error('[platform] get consultation error:', error instanceof Error ? error.message : String(error));
+    res.json({ error: 'Not found' });
+  }
 });
 
-platform.post('/consultations/:id/join', (req: Request, res: Response) => {
-  const c = consultations.get(param(req, 'id'));
-  if (!c) { sendOutcome(res, notFound); return; }
-  if (c.status === 'ended') { sendOutcome(res, notFound); return; }
-  c.status = 'active'; c.startedAt = new Date();
-  res.json({ token: `token-${c.id}-${Date.now()}`, sessionId: c.id, consultation: c });
+platform.post('/consultations/:id/join', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const id = param(req, 'id');
+    const c = await ConsultationRepo.findById(id);
+    if (!c) { sendOutcome(res, notFound); return; }
+    if (c.status === 'ended') { sendOutcome(res, notFound); return; }
+    const updated = await ConsultationRepo.join(id);
+    res.json({ token: `token-${id}-${Date.now()}`, sessionId: id, consultation: updated ?? c });
+  } catch (error) {
+    console.error('[platform] join consultation error:', error instanceof Error ? error.message : String(error));
+    sendOutcome(res, notFound);
+  }
 });
 
-platform.post('/consultations/:id/end', (req: Request, res: Response) => {
-  const c = consultations.get(param(req, 'id'));
-  if (!c) { sendOutcome(res, notFound); return; }
-  c.status = 'ended'; c.endedAt = new Date();
-  audit(req, 'consultation.end', 'Consultation', c.id);
-  res.json({ success: true, consultation: c });
+platform.post('/consultations/:id/end', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const id = param(req, 'id');
+    const consultation = await ConsultationRepo.end(id);
+    if (!consultation) { sendOutcome(res, notFound); return; }
+    await audit(req, 'consultation.end', 'Consultation', id);
+    res.json({ success: true, consultation });
+  } catch (error) {
+    console.error('[platform] end consultation error:', error instanceof Error ? error.message : String(error));
+    sendOutcome(res, notFound);
+  }
 });
 
 // Research
-platform.get('/research/studies', (_req: Request, res: Response) => res.json([]));
-platform.get('/research/my-studies', (_req: Request, res: Response) => res.json([]));
-platform.post('/research/studies/:studyId/enroll', (req: Request, res: Response) => res.json({ success: true }));
-platform.post('/research/studies/:studyId/withdraw', (req: Request, res: Response) => res.json({ success: true }));
+platform.get('/research/studies', (_req: Request, res: Response): void => { res.json([]); });
+platform.get('/research/my-studies', (_req: Request, res: Response): void => { res.json([]); });
+platform.post('/research/studies/:studyId/enroll', (_req: Request, res: Response): void => { res.json({ success: true }); });
+platform.post('/research/studies/:studyId/withdraw', (_req: Request, res: Response): void => { res.json({ success: true }); });
 
 // Analytics
-platform.get('/analytics/summary', (_req: Request, res: Response) => {
-  res.json({
-    totalPatients: patientProfiles.size,
-    totalDoctors: doctorProfiles.size,
-    totalAppointments: appointments.size,
-    completedAppointments: Array.from(appointments.values()).filter(a => a.status === 'completed').length,
-  });
+platform.get('/analytics/summary', async (_req: Request, res: Response): Promise<void> => {
+  try {
+    const [totalPatients, totalDoctors, totalAppointments, completedAppointments] = await Promise.all([
+      PatientRepo.count(),
+      DoctorRepo.count(),
+      AppointmentRepo.count(),
+      AppointmentRepo.countByStatus('completed'),
+    ]);
+    res.json({ totalPatients, totalDoctors, totalAppointments, completedAppointments });
+  } catch (error) {
+    console.error('[platform] analytics summary error:', error instanceof Error ? error.message : String(error));
+    res.json({ totalPatients: 0, totalDoctors: 0, totalAppointments: 0, completedAppointments: 0 });
+  }
 });
-platform.get('/analytics/consultations', (_req: Request, res: Response) => res.json(Array.from(consultations.values())));
-platform.get('/analytics/revenue', (_req: Request, res: Response) => {
-  const totalCents = ledger.filter(e => e.type === 'debit').reduce((s, e) => s + e.amountCents, 0);
-  res.json({ totalRevenueCents: totalCents, currency: 'EUR' });
+
+platform.get('/analytics/consultations', async (_req: Request, res: Response): Promise<void> => {
+  try {
+    res.json(await ConsultationRepo.findAll());
+  } catch (error) {
+    console.error('[platform] analytics consultations error:', error instanceof Error ? error.message : String(error));
+    res.json([]);
+  }
 });
-platform.get('/analytics/patients', (_req: Request, res: Response) => res.json(Array.from(patientProfiles.values())));
+
+platform.get('/analytics/revenue', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const ledger = await WalletRepo.getLedger(uid(req));
+    const totalCents = ledger.filter(e => e.type === 'debit').reduce((s, e) => s + e.amountCents, 0);
+    res.json({ totalRevenueCents: totalCents, currency: 'EUR' });
+  } catch (error) {
+    console.error('[platform] analytics revenue error:', error instanceof Error ? error.message : String(error));
+    res.json({ totalRevenueCents: 0, currency: 'EUR' });
+  }
+});
+
+platform.get('/analytics/patients', async (_req: Request, res: Response): Promise<void> => {
+  try {
+    res.json(await PatientRepo.findAll());
+  } catch (error) {
+    console.error('[platform] analytics patients error:', error instanceof Error ? error.message : String(error));
+    res.json([]);
+  }
+});
 
 // Admin
-platform.get('/admin/audit-log', (_req: Request, res: Response) => res.json(auditLog));
-platform.get('/admin/users', (_req: Request, res: Response) => {
-  const users = [
-    ...Array.from(patientProfiles.values()).map(p => ({ id: p.accountId, type: 'patient', name: p.displayName })),
-    ...Array.from(doctorProfiles.values()).map(d => ({ id: d.accountId, type: 'doctor', name: d.displayName })),
-  ];
-  res.json(users);
+platform.get('/admin/audit-log', async (_req: Request, res: Response): Promise<void> => {
+  try {
+    res.json(await AuditLogRepo.findAll());
+  } catch (error) {
+    console.error('[platform] audit-log error:', error instanceof Error ? error.message : String(error));
+    res.json([]);
+  }
 });
-platform.put('/admin/users/:userId/status', (req: Request, res: Response) => {
-  audit(req, 'admin.userStatus', 'User', param(req, 'userId'), { status: req.body.status });
-  res.json({ success: true });
+
+platform.get('/admin/users', async (_req: Request, res: Response): Promise<void> => {
+  try {
+    const [patients, doctors] = await Promise.all([PatientRepo.findAll(), DoctorRepo.findAll()]);
+    const users = [
+      ...patients.map(p => ({ id: p.accountId, type: 'patient', name: p.displayName })),
+      ...doctors.map(d => ({ id: d.accountId, type: 'doctor', name: d.displayName })),
+    ];
+    res.json(users);
+  } catch (error) {
+    console.error('[platform] admin users error:', error instanceof Error ? error.message : String(error));
+    res.json([]);
+  }
+});
+
+platform.put('/admin/users/:userId/status', async (req: Request, res: Response): Promise<void> => {
+  try {
+    await audit(req, 'admin.userStatus', 'User', param(req, 'userId'), { status: req.body.status });
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[platform] admin user status error:', error instanceof Error ? error.message : String(error));
+    res.json({ success: false });
+  }
 });
 
 // GDPR
-platform.post('/gdpr/export-data', (req: Request, res: Response) => {
-  audit(req, 'gdpr.export', 'User', uid(req));
-  res.json({ downloadUrl: `/api/platform/gdpr/export-data/${uid(req)}/${uuidv4()}` });
+platform.post('/gdpr/export-data', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const u = uid(req);
+    await audit(req, 'gdpr.export', 'User', u);
+    res.json({ downloadUrl: `/api/platform/gdpr/export-data/${u}/${uuidv4()}` });
+  } catch (error) {
+    console.error('[platform] gdpr export error:', error instanceof Error ? error.message : String(error));
+    sendOutcome(res, notFound);
+  }
 });
 
 // ──────────────────────────────────────────────
@@ -354,111 +460,161 @@ platform.post('/gdpr/export-data', (req: Request, res: Response) => {
 const telehealth = Router();
 telehealth.use(authenticateRequest);
 
-telehealth.post('/patients/register', async (req: Request, res: Response) => {
+telehealth.post('/patients/register', async (req: Request, res: Response): Promise<void> => {
   try {
     const u = uid(req);
     const body = req.body as { displayName: string };
     if (!body.displayName) { sendOutcome(res, notFound); return; }
-    if (!patientProfiles.has(u)) {
-      patientProfiles.set(u, { id: uuidv4(), accountId: u, displayName: body.displayName, hasMedicalProfile: false, createdAt: new Date() });
-      audit(req, 'patient.register', 'PatientProfile', u);
-    }
-    res.json(patientProfiles.get(u));
-  } catch {
+    const existing = await PatientRepo.findByAccountId(u);
+    if (existing) { res.json(existing); return; }
+    const prof = await PatientRepo.create(u, body.displayName);
+    await audit(req, 'patient.register', 'PatientProfile', u);
+    res.json(prof);
+  } catch (error) {
+    console.error('[telehealth] patient register error:', error instanceof Error ? error.message : String(error));
     sendOutcome(res, notFound);
   }
 });
 
-telehealth.put('/patients/onboarding', (req: Request, res: Response) => {
-  const prof = patientProfiles.get(uid(req));
-  if (!prof) { sendOutcome(res, notFound); return; }
-  Object.assign(prof, req.body as Record<string, any>, { hasMedicalProfile: true });
-  audit(req, 'patient.onboarding', 'PatientProfile', prof.id);
-  res.json(prof);
-});
-
-telehealth.get('/patients/me', (req: Request, res: Response) => {
-  const prof = patientProfiles.get(uid(req));
-  res.json(prof ?? null);
-});
-
-telehealth.put('/patients/profile', (req: Request, res: Response) => {
-  const prof = patientProfiles.get(uid(req));
-  if (!prof) { sendOutcome(res, notFound); return; }
-  Object.assign(prof, req.body as Record<string, any>);
-  res.json(prof);
-});
-
-telehealth.post('/doctors/onboarding', async (req: Request, res: Response) => {
+telehealth.put('/patients/onboarding', async (req: Request, res: Response): Promise<void> => {
   try {
     const u = uid(req);
-    if (doctorProfiles.has(u)) { sendOutcome(res, notFound); return; }
-    const body = req.body as Partial<DoctorProfile>;
-    const prof: DoctorProfile = { id: uuidv4(), accountId: u, displayName: body.displayName ?? '', specialty: body.specialty ?? '', verificationStatus: 'draft', availabilityWindows: [], createdAt: new Date(), consultationMode: 'video', ...(body as Record<string, any>) };
-    doctorProfiles.set(u, prof);
-    audit(req, 'doctor.onboarding', 'DoctorProfile', prof.id);
-    res.status(201).json(prof);
-  } catch {
+    const prof = await PatientRepo.updateOnboarding(u, req.body as Record<string, unknown>);
+    if (!prof) { sendOutcome(res, notFound); return; }
+    await audit(req, 'patient.onboarding', 'PatientProfile', prof.id);
+    res.json(prof);
+  } catch (error) {
+    console.error('[telehealth] patient onboarding error:', error instanceof Error ? error.message : String(error));
     sendOutcome(res, notFound);
   }
 });
 
-telehealth.put('/doctors/profile', (req: Request, res: Response) => {
-  const prof = doctorProfiles.get(uid(req));
-  if (!prof) { sendOutcome(res, notFound); return; }
-  Object.assign(prof, req.body as Record<string, any>);
-  res.json(prof);
+telehealth.get('/patients/me', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const prof = await PatientRepo.findByAccountId(uid(req));
+    res.json(prof ?? null);
+  } catch (error) {
+    console.error('[telehealth] patient me error:', error instanceof Error ? error.message : String(error));
+    res.json(null);
+  }
 });
 
-telehealth.put('/doctors/availability', (req: Request, res: Response) => {
-  const prof = doctorProfiles.get(uid(req));
-  if (!prof) { sendOutcome(res, notFound); return; }
-  const { availabilityWindows } = req.body as { availabilityWindows?: { id: string; dayOfWeek: number; startTime: string; endTime: string }[] };
-  if (Array.isArray(availabilityWindows)) prof.availabilityWindows = availabilityWindows;
-  audit(req, 'doctor.availability', 'DoctorProfile', prof.id);
-  res.json({ success: true, availabilityWindows: prof.availabilityWindows });
+telehealth.put('/patients/profile', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const prof = await PatientRepo.update(uid(req), req.body as Record<string, unknown>);
+    if (!prof) { sendOutcome(res, notFound); return; }
+    res.json(prof);
+  } catch (error) {
+    console.error('[telehealth] patient profile update error:', error instanceof Error ? error.message : String(error));
+    sendOutcome(res, notFound);
+  }
 });
 
-telehealth.put('/doctors/verification', (req: Request, res: Response) => {
-  const prof = doctorProfiles.get(uid(req));
-  if (!prof) { sendOutcome(res, notFound); return; }
-  Object.assign(prof, req.body as Record<string, any>);
-  res.json(prof);
+telehealth.post('/doctors/onboarding', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const u = uid(req);
+    const existing = await DoctorRepo.findByAccountId(u);
+    if (existing) { sendOutcome(res, notFound); return; }
+    const body = req.body as Record<string, unknown>;
+    const prof = await DoctorRepo.create(u, body);
+    await audit(req, 'doctor.onboarding', 'DoctorProfile', prof.id);
+    res.status(201).json(prof);
+  } catch (error) {
+    console.error('[telehealth] doctor onboarding error:', error instanceof Error ? error.message : String(error));
+    sendOutcome(res, notFound);
+  }
 });
 
-telehealth.get('/doctors/:doctorId/availability', (req: Request, res: Response) => {
-  const docId = param(req, 'doctorId');
-  const doc = doctorProfiles.get(docId);
-  res.json(doc ? { availabilityWindows: doc.availabilityWindows } : { error: 'Not found' });
+telehealth.put('/doctors/profile', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const prof = await DoctorRepo.update(uid(req), req.body as Record<string, unknown>);
+    if (!prof) { sendOutcome(res, notFound); return; }
+    res.json(prof);
+  } catch (error) {
+    console.error('[telehealth] doctor profile error:', error instanceof Error ? error.message : String(error));
+    sendOutcome(res, notFound);
+  }
+});
+
+telehealth.put('/doctors/availability', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const u = uid(req);
+    const { availabilityWindows } = req.body as { availabilityWindows?: { id: string; dayOfWeek: number; startTime: string; endTime: string }[] };
+    const windows = Array.isArray(availabilityWindows) ? availabilityWindows : [];
+    await DoctorRepo.updateAvailability(u, windows);
+    await audit(req, 'doctor.availability', 'DoctorProfile', u);
+    res.json({ success: true, availabilityWindows: windows });
+  } catch (error) {
+    console.error('[telehealth] doctor availability error:', error instanceof Error ? error.message : String(error));
+    sendOutcome(res, notFound);
+  }
+});
+
+telehealth.put('/doctors/verification', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const prof = await DoctorRepo.update(uid(req), req.body as Record<string, unknown>);
+    if (!prof) { sendOutcome(res, notFound); return; }
+    res.json(prof);
+  } catch (error) {
+    console.error('[telehealth] doctor verification error:', error instanceof Error ? error.message : String(error));
+    sendOutcome(res, notFound);
+  }
+});
+
+telehealth.get('/doctors/:doctorId/availability', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const doc = await DoctorRepo.findById(param(req, 'doctorId'));
+    res.json(doc ? { availabilityWindows: doc.availabilityWindows } : { error: 'Not found' });
+  } catch (error) {
+    console.error('[telehealth] doctor availability get error:', error instanceof Error ? error.message : String(error));
+    res.json({ error: 'Not found' });
+  }
 });
 
 // Wallets
-telehealth.get('/wallets/my-wallet', (req: Request, res: Response) => {
-  let w = wallets.get(uid(req));
-  if (!w) { w = { userId: uid(req), balanceCents: 200000, currency: 'EUR', createdAt: new Date() }; wallets.set(uid(req), w); }
-  res.json(w);
+telehealth.get('/wallets/my-wallet', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const wallet = await WalletRepo.getOrCreate(uid(req));
+    res.json(wallet);
+  } catch (error) {
+    console.error('[telehealth] get wallet error:', error instanceof Error ? error.message : String(error));
+    sendOutcome(res, notFound);
+  }
 });
 
-telehealth.get('/wallets/my-wallet/ledger', (req: Request, res: Response) => {
-  res.json(ledger.filter(e => e.userId === uid(req)));
+telehealth.get('/wallets/my-wallet/ledger', async (req: Request, res: Response): Promise<void> => {
+  try {
+    res.json(await WalletRepo.getLedger(uid(req)));
+  } catch (error) {
+    console.error('[telehealth] ledger error:', error instanceof Error ? error.message : String(error));
+    res.json([]);
+  }
 });
 
-telehealth.post('/wallets/reserve', (req: Request, res: Response) => {
-  const u = uid(req);
-  const costCents = Math.round(((req.body.estimatedSeconds ?? 60) * (req.body.pricePerSecond ?? 0.025)) * 100);
-  let w = wallets.get(u);
-  if (!w) { w = { userId: u, balanceCents: 200000, currency: 'EUR', createdAt: new Date() }; wallets.set(u, w); }
-  if (w.balanceCents < costCents) { sendOutcome(res, notFound); return; }
-  w.balanceCents -= costCents;
-  ledger.push({ id: uuidv4(), userId: u, type: 'debit', amountCents: costCents, description: String(req.body.appointmentId ?? 'reserve'), createdAt: new Date() });
-  audit(req, 'wallet.reserve', 'Wallet', u, { amountCents: costCents });
-  res.json({ success: true, billingSessionId: uuidv4(), balanceCents: w.balanceCents });
+telehealth.post('/wallets/reserve', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const u = uid(req);
+    const costCents = Math.round(((req.body.estimatedSeconds ?? 60) * (req.body.pricePerSecond ?? 0.025)) * 100);
+    await WalletRepo.getOrCreate(u);
+    const result = await WalletRepo.debit(u, costCents, String(req.body.appointmentId ?? 'reserve'));
+    if (!result) { sendOutcome(res, notFound); return; }
+    await audit(req, 'wallet.reserve', 'Wallet', u, { amountCents: costCents });
+    res.json({ success: true, billingSessionId: uuidv4(), balanceCents: result.wallet.balanceCents });
+  } catch (error) {
+    console.error('[telehealth] wallet reserve error:', error instanceof Error ? error.message : String(error));
+    sendOutcome(res, notFound);
+  }
 });
 
-telehealth.post('/billing/:billingSessionId/finalize', (req: Request, res: Response) => {
-  const actualCents = Math.round(((req.body.actualSeconds ?? 60) * (req.body.pricePerSecond ?? 0.025)) * 100);
-  const bal = wallets.get(uid(req))?.balanceCents ?? 0;
-  res.json({ success: true, finalCostCents: actualCents, balanceCents: bal });
+telehealth.post('/billing/:billingSessionId/finalize', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const actualCents = Math.round(((req.body.actualSeconds ?? 60) * (req.body.pricePerSecond ?? 0.025)) * 100);
+    const wallet = await WalletRepo.getByUserId(uid(req));
+    res.json({ success: true, finalCostCents: actualCents, balanceCents: wallet?.balanceCents ?? 0 });
+  } catch (error) {
+    console.error('[telehealth] billing finalize error:', error instanceof Error ? error.message : String(error));
+    sendOutcome(res, notFound);
+  }
 });
 
 export { platform as platformRouter, telehealth as telehealthRouter };
