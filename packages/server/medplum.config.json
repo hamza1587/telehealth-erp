@@ -22,13 +22,12 @@
     "host": "localhost",
     "port": 5432,
     "dbname": "medplum",
-    "username": "medplum",
-    "password": "medplum"
+    "username": "postgres",
+    "password": "postgres"
   },
   "redis": {
     "host": "localhost",
-    "port": 6379,
-    "password": "medplum"
+    "port": 6379
   },
   "bullmq": {
     "removeOnFail": { "count": 1 },
