@@ -16,6 +16,7 @@ import * as TicketRepo from './repositories/TicketRepository';
 import * as NotificationRepo from './repositories/NotificationRepository';
 import * as WalletRepo from './repositories/WalletRepository';
 import * as AuditLogRepo from './repositories/AuditLogRepository';
+import { analyticsRouter } from './controllers/AnalyticsController';
 
 function param(req: Request, key: string): string {
   const v = req.params[key];
@@ -362,50 +363,8 @@ platform.get('/research/my-studies', (_req: Request, res: Response): void => { r
 platform.post('/research/studies/:studyId/enroll', (_req: Request, res: Response): void => { res.json({ success: true }); });
 platform.post('/research/studies/:studyId/withdraw', (_req: Request, res: Response): void => { res.json({ success: true }); });
 
-// Analytics
-platform.get('/analytics/summary', async (_req: Request, res: Response): Promise<void> => {
-  try {
-    const [totalPatients, totalDoctors, totalAppointments, completedAppointments] = await Promise.all([
-      PatientRepo.count(),
-      DoctorRepo.count(),
-      AppointmentRepo.count(),
-      AppointmentRepo.countByStatus('completed'),
-    ]);
-    res.json({ totalPatients, totalDoctors, totalAppointments, completedAppointments });
-  } catch (error) {
-    console.error('[platform] analytics summary error:', error instanceof Error ? error.message : String(error));
-    res.json({ totalPatients: 0, totalDoctors: 0, totalAppointments: 0, completedAppointments: 0 });
-  }
-});
-
-platform.get('/analytics/consultations', async (_req: Request, res: Response): Promise<void> => {
-  try {
-    res.json(await ConsultationRepo.findAll());
-  } catch (error) {
-    console.error('[platform] analytics consultations error:', error instanceof Error ? error.message : String(error));
-    res.json([]);
-  }
-});
-
-platform.get('/analytics/revenue', async (req: Request, res: Response): Promise<void> => {
-  try {
-    const ledger = await WalletRepo.getLedger(uid(req));
-    const totalCents = ledger.filter(e => e.type === 'debit').reduce((s, e) => s + e.amountCents, 0);
-    res.json({ totalRevenueCents: totalCents, currency: 'EUR' });
-  } catch (error) {
-    console.error('[platform] analytics revenue error:', error instanceof Error ? error.message : String(error));
-    res.json({ totalRevenueCents: 0, currency: 'EUR' });
-  }
-});
-
-platform.get('/analytics/patients', async (_req: Request, res: Response): Promise<void> => {
-  try {
-    res.json(await PatientRepo.findAll());
-  } catch (error) {
-    console.error('[platform] analytics patients error:', error instanceof Error ? error.message : String(error));
-    res.json([]);
-  }
-});
+// Analytics — delegated to AnalyticsController
+platform.use('/analytics', analyticsRouter);
 
 // Admin
 platform.get('/admin/audit-log', async (_req: Request, res: Response): Promise<void> => {
