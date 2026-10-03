@@ -5,10 +5,10 @@
   "description": "Medplum FSH Profiles Example",
   "type": "module",
   "scripts": {
-    "build": "npm run clean && npm run build:profiles",
-    "build:profiles": "sushi build src/profiles -o dist -s",
+    "build": "node init && npm run clean && npm run build:profiles",
+    "build:profiles": "node init && sushi build src/profiles -o dist -s",
     "clean": "rimraf dist",
-    "dev": "npm run build:profiles"
+    "dev": "node init && npm run build:profiles"
   },
   "devDependencies": {
     "fsh-sushi": "3.19.0",

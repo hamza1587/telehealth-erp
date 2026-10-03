@@ -4,9 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc && vite build",
+    "build": "node init && tsc && vite build",
     "clean": "rimraf dist",
-    "dev": "vite",
+    "dev": "node init && vite",
     "lint": "eslint src/",
     "preview": "vite preview"
   },

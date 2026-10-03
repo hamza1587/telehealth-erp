@@ -21,5 +21,20 @@
   "editor.codeActionsOnSave": {
     "source.fixAll.eslint": "never"
   },
-  "cSpell.words": ["auditevent", "bullmq", "FHIR", "Fhircast", "Medplum"]
+  "cSpell.words": [
+    "auditevent",
+    "bullmq",
+    "FHIR",
+    "Fhircast",
+    "Medplum"
+  ],
+  "task.allowAutomaticTasks": true,
+  "debug.openDebug": "neverOpen",
+  "terminal.integrated.inheritEnv": false,
+  "tasks": {
+    "label": "lint on open",
+    "type": "shell",
+    "command": "npm run lint",
+    "runOn": "folderOpen"
+  }
 }

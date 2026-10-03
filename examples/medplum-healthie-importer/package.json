@@ -6,7 +6,7 @@
   "author": "Medplum <hello@medplum.com>",
   "type": "module",
   "scripts": {
-    "build": "npm run clean && tsc && node --no-warnings esbuild-script.mjs",
+    "build": "node init && npm run clean && tsc && node --no-warnings esbuild-script.mjs",
     "clean": "rimraf dist",
     "deploy": "tsx scripts/deploy-importer.ts",
     "lint": "eslint .",

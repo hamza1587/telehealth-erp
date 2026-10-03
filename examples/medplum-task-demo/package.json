@@ -4,10 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "npm run build:bots && tsc && vite build",
-    "build:bots": "npm run clean && tsc && node --no-warnings esbuild-script.mjs && tsx src/scripts/deploy-bots.ts",
+    "build": "node init && npm run build:bots && tsc && vite build",
+    "build:bots": "node init && npm run clean && tsc && node --no-warnings esbuild-script.mjs && tsx src/scripts/deploy-bots.ts",
     "clean": "rimraf dist data/example/example-bots.json",
-    "dev": "npm run build:bots && vite",
+    "dev": "node init && npm run build:bots && vite",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
     "preview": "vite preview",

@@ -19,9 +19,9 @@
     "dist"
   ],
   "scripts": {
-    "build": "npm run clean && tsc && vite build",
+    "build": "node init && npm run clean && tsc && vite build",
     "clean": "rimraf dist",
-    "dev": "vite",
+    "dev": "node init && vite",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "preview": "vite preview",

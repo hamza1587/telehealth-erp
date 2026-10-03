@@ -3,9 +3,9 @@
   "version": "5.1.9",
   "type": "module",
   "scripts": {
-    "build": "tsc && vite build",
+    "build": "node init && tsc && vite build",
     "coverage": "jest --coverage",
-    "dev": "vite",
+    "dev": "node init && vite",
     "lint": "eslint . --ext .js,.jsx,.ts,.tsx --fix src",
     "preview": "vite preview",
     "test": "jest"
